@@ -13,3 +13,6 @@ Thumbs.db
 **/.env.*
 **/data/
 **/store.json
+
+# アイコン候補（採用前のドラフト、リポには含めない）
+icons-candidates/
