@@ -1,0 +1,15 @@
+# OS / Editor
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
+
+# 念のため: 個人データ・トークン類を絶対追跡しないように
+*.token
+*.secret
+**/config.json
+**/.env
+**/.env.*
+**/data/
+**/store.json
