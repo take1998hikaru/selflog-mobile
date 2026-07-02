@@ -1191,8 +1191,13 @@ function Home({ navigate }) {
   const [priorityItems, setPriorityItems] = useState([]);
   const [briefing, setBriefing] = useState(null);
   const [briefingLoading, setBriefingLoading] = useState(false);
+  const [briefingDate, setBriefingDate] = useState(DB.today());
+  const [briefingSource, setBriefingSource] = useState(null); // 'api'(PC) | 'gist'(スマホ)
+  const briefingDateRef = useRef(DB.today());
   const [garmin, setGarmin] = useState(null);
   const [garminRows, setGarminRows] = useState([]);
+  const [garminUpdatedAt, setGarminUpdatedAt] = useState(null);
+  const [garminIdx, setGarminIdx] = useState(0); // 0=最新日, 1=前日, 2=前々日…
   const [toastEl, showToast] = useToast();
 
   const loadGarmin = useCallback(() => {
@@ -1202,27 +1207,52 @@ function Home({ navigate }) {
         if (!g) return;
         if (g.latest) setGarmin(g.latest);
         if (g.rows) setGarminRows(g.rows);
+        setGarminUpdatedAt(g._uploadedAt || g.updatedAt || null);
       })
       .catch(() => {});
   }, []);
 
-  const loadBriefing = useCallback(() => {
+  const loadBriefing = useCallback((dateArg) => {
+    const d = dateArg || briefingDateRef.current;
     // まずローカル server.py を試す（PC）
-    fetch('/api/switchbot/summary?date=' + DB.today())
+    fetch('/api/switchbot/summary?date=' + d)
       .then(r => r.ok ? r.json() : null)
       .then(b => {
         if (b && !b.error) {
+          b._fetchedAt = new Date().toISOString();
           setBriefing(b);
-          saveBriefingToGist(b); // 成功したら Gist にも中継
+          setBriefingSource('api');
+          if (d === DB.today()) saveBriefingToGist(b); // 今日の分だけGistへ中継
         } else {
           throw new Error('backend unavailable');
         }
       })
       .catch(() => {
         // フォールバック: Gist から最新ブリーフィングを読む（スマホ）
-        loadBriefingFromGist().then(b => { if (b) setBriefing(b); });
+        loadBriefingFromGist().then(b => { if (b) { setBriefing(b); setBriefingSource('gist'); } });
       });
   }, []);
+
+  // ブリーフィングの表示日を前後に動かす（PCのみ、未来へは行けない）
+  const changeBriefingDate = (delta) => {
+    const cur = new Date(briefingDateRef.current + 'T00:00:00');
+    cur.setDate(cur.getDate() + delta);
+    const p = n => String(n).padStart(2, '0');
+    const d = `${cur.getFullYear()}-${p(cur.getMonth() + 1)}-${p(cur.getDate())}`;
+    if (d > DB.today()) return;
+    briefingDateRef.current = d;
+    setBriefingDate(d);
+    loadBriefing(d);
+  };
+
+  // 更新時刻の表示用 (ISO → M/D HH:MM)
+  const fmtUpdated = (iso) => {
+    if (!iso) return null;
+    const t = new Date(iso);
+    if (isNaN(t)) return null;
+    const p = n => String(n).padStart(2, '0');
+    return `${t.getMonth() + 1}/${t.getDate()} ${p(t.getHours())}:${p(t.getMinutes())}`;
+  };
 
   const refreshBriefing = async () => {
     setBriefingLoading(true);
@@ -1374,7 +1404,7 @@ function Home({ navigate }) {
       </div>
 
       {/* 朝のブリーフィング（SwitchBot） */}
-      {briefing && (briefing.devices?.寝室 || briefing.devices?.外 || Object.keys(briefing.latest || {}).length > 0) && (
+      {briefing && (briefingSource === 'api' || briefing.devices?.寝室 || briefing.devices?.外 || Object.keys(briefing.latest || {}).length > 0) && (
         <div className="card">
           <div className="card-title" style={{ marginBottom: 8 }}>
             <span>🛏️ 朝のブリーフィング</span>
@@ -1398,6 +1428,35 @@ function Home({ navigate }) {
                 {briefingLoading ? '更新中…' : '↻ 更新'}
               </button>
             </span>
+          </div>
+
+          {/* 日付切り替え（PCのみ）＋更新時刻 */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+            {briefingSource === 'api' && (
+              <button onClick={() => changeBriefingDate(-1)}
+                style={{ border: '1px solid var(--border)', background: 'var(--card2)', color: 'var(--text)',
+                         borderRadius: 6, padding: '1px 8px', fontSize: '0.7rem', cursor: 'pointer', fontFamily: 'inherit' }}>
+                ◀
+              </button>
+            )}
+            <span style={{ fontSize: '0.72rem', fontWeight: 600,
+                           color: briefingDate === DB.today() ? 'var(--dim)' : 'var(--orange)' }}>
+              {DB.formatDate(briefingDate)}{briefingDate === DB.today() ? '' : '（過去）'}
+            </span>
+            {briefingSource === 'api' && (
+              <button onClick={() => changeBriefingDate(1)} disabled={briefingDate === DB.today()}
+                style={{ border: '1px solid var(--border)', background: 'var(--card2)',
+                         color: briefingDate === DB.today() ? 'var(--border)' : 'var(--text)',
+                         borderRadius: 6, padding: '1px 8px', fontSize: '0.7rem',
+                         cursor: briefingDate === DB.today() ? 'default' : 'pointer', fontFamily: 'inherit' }}>
+                ▶
+              </button>
+            )}
+            {briefingSource === 'api' && briefing._fetchedAt && (
+              <span style={{ marginLeft: 'auto', fontSize: '0.65rem', color: 'var(--dim)' }}>
+                データ更新 {fmtUpdated(briefing._fetchedAt)}
+              </span>
+            )}
           </div>
 
           {briefing._uploadedAt && (() => {
@@ -1491,28 +1550,38 @@ function Home({ navigate }) {
         </div>
       )}
 
-      {/* 今日のフィジカル（Garmin） */}
-      {garmin && (() => {
-        const sm = garmin.sleepMinutes;
+      {/* 今日のフィジカル（Garmin、◀▶で過去の日も見られる） */}
+      {(garminRows.length > 0 || garmin) && (() => {
+        const rowsArr = garminRows.length ? garminRows : [garmin];
+        const idx = Math.min(garminIdx, rowsArr.length - 1);
+        const day = rowsArr[rowsArr.length - 1 - idx];
+        const relLabel = idx === 0 ? '今日' : idx === 1 ? '昨日' : idx === 2 ? '一昨日' : `${idx}日前`;
+        const sm = day.sleepMinutes;
         const sleepStr = (sm != null) ? `${Math.floor(sm/60)}h ${sm%60}m` : null;
-        const score = garmin.sleepScore;
+        const score = day.sleepScore;
         const scoreColor = score == null ? 'var(--dim)'
           : score >= 80 ? 'var(--accent)'
           : score >= 60 ? 'var(--orange)'
           : 'var(--red, #e06)';
         // 安静時心拍: 7日平均との差で色付け（低い=回復良好）
-        const hrDelta = (garmin.restingHr != null && garmin.restingHr7d != null)
-          ? garmin.restingHr - garmin.restingHr7d : null;
+        const hrDelta = (day.restingHr != null && day.restingHr7d != null)
+          ? day.restingHr - day.restingHr7d : null;
         const hrColor = hrDelta == null ? undefined
           : hrDelta <= 0 ? 'var(--accent)'
           : hrDelta >= 4 ? 'var(--orange)'
           : undefined;
         // ストレス: Garmin基準（〜25 休息 / 〜50 低 / 〜75 中 / 76〜 高）
-        const st = garmin.stress;
+        const st = day.stress;
         const stColor = st == null ? undefined
           : st <= 25 ? 'var(--accent)'
           : st <= 50 ? undefined
           : 'var(--orange)';
+        const dayBtn = (disabled) => ({
+          border: '1px solid var(--border)', background: 'var(--card2)',
+          color: disabled ? 'var(--border)' : 'var(--text)',
+          borderRadius: 6, padding: '1px 8px', fontSize: '0.7rem',
+          cursor: disabled ? 'default' : 'pointer', fontFamily: 'inherit',
+        });
         const Stat = ({ label, value, unit, color, sub }) => (
           <div style={{ flex: '1 1 70px', minWidth: 64 }}>
             <div style={{ fontSize: '0.62rem', color: 'var(--dim)', marginBottom: 1 }}>{label}</div>
@@ -1547,22 +1616,29 @@ function Home({ navigate }) {
         return (
           <div className="card">
             <div className="card-title" style={{ marginBottom: 8 }}>
-              <span>⌚ 今日のフィジカル</span>
-              <span style={{ fontSize: '0.68rem', color: 'var(--dim)', fontWeight: 500 }}>{garmin.date}</span>
+              <span>⌚ {relLabel}のフィジカル</span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <button onClick={() => setGarminIdx(idx + 1)} disabled={idx >= rowsArr.length - 1}
+                  style={dayBtn(idx >= rowsArr.length - 1)}>◀</button>
+                <span style={{ fontSize: '0.68rem', fontWeight: 500,
+                               color: idx === 0 ? 'var(--dim)' : 'var(--orange)' }}>{day.date}</span>
+                <button onClick={() => setGarminIdx(idx - 1)} disabled={idx === 0}
+                  style={dayBtn(idx === 0)}>▶</button>
+              </span>
             </div>
-            {(garmin.bedTime || garmin.wakeTime) && (
+            {(day.bedTime || day.wakeTime) && (
               <div style={{ fontSize: '0.78rem', color: 'var(--dim)', marginBottom: 8 }}>
-                🛏 {garmin.bedTime || '—'} 〜 {garmin.wakeTime || '—'}
+                🛏 {day.bedTime || '—'} 〜 {day.wakeTime || '—'}
                 {sleepStr && <span style={{ marginLeft: 8, color: 'var(--text)' }}>（{sleepStr}）</span>}
               </div>
             )}
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, rowGap: 12 }}>
               <Stat label="睡眠スコア" value={score} color={scoreColor}/>
-              <Stat label="安静時心拍" value={garmin.restingHr} unit="bpm" color={hrColor}
+              <Stat label="安静時心拍" value={day.restingHr} unit="bpm" color={hrColor}
                 sub={hrDelta != null ? `7日平均${hrDelta > 0 ? '+' : ''}${hrDelta}` : null}/>
-              <Stat label="歩数" value={garmin.steps != null ? garmin.steps.toLocaleString() : null}/>
+              <Stat label="歩数" value={day.steps != null ? day.steps.toLocaleString() : null}/>
               <Stat label="ストレス" value={st} color={stColor}/>
-              <Stat label="消費kcal" value={garmin.calories != null ? garmin.calories.toLocaleString() : null}/>
+              <Stat label="消費kcal" value={day.calories != null ? day.calories.toLocaleString() : null}/>
             </div>
             {spark14.length >= 2 && (
               <div style={{ display: 'flex', gap: 12, marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
@@ -1577,6 +1653,11 @@ function Home({ navigate }) {
                        fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}>
               📈 推移をくわしく見る
             </button>
+            {garminUpdatedAt && (
+              <div style={{ fontSize: '0.62rem', color: 'var(--dim)', textAlign: 'right', marginTop: 6 }}>
+                データ更新 {fmtUpdated(garminUpdatedAt)}
+              </div>
+            )}
           </div>
         );
       })()}
@@ -3172,10 +3253,14 @@ function TrendCard({ title, unit, rows, series, formatVal }) {
 function PhysicalPage({ navigate }) {
   const [rows, setRows] = useState(null);
   const [span, setSpan] = useState(14);
+  const [updatedAt, setUpdatedAt] = useState(null);
 
   useEffect(() => {
     fetchGarminData()
-      .then(g => setRows((g && g.rows) || []))
+      .then(g => {
+        setRows((g && g.rows) || []);
+        setUpdatedAt(g ? (g._uploadedAt || g.updatedAt || null) : null);
+      })
       .catch(() => setRows([]));
   }, []);
 
@@ -3263,7 +3348,8 @@ function PhysicalPage({ navigate }) {
         series={[{ label: '歩数', color: '#9ece6a', get: r => r.steps }]}/>
 
       <div style={{ fontSize: '0.68rem', color: 'var(--dim)', textAlign: 'center', margin: '4px 0 12px' }}>
-        ⌚ データはGarminから毎日9:00に自動取得されます
+        ⌚ Garminから自動更新（PC: 毎朝9時 ／ クラウド: 3時間ごと）
+        {updatedAt && <><br/>データ更新 {(() => { const t = new Date(updatedAt); const p = n => String(n).padStart(2, '0'); return isNaN(t) ? '' : `${t.getMonth() + 1}/${t.getDate()} ${p(t.getHours())}:${p(t.getMinutes())}`; })()}</>}
       </div>
     </div>
   );
