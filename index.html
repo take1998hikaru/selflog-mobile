@@ -76,6 +76,54 @@ function loadBriefingFromGist() {
     .catch(() => null);
 }
 
+// ── Garmin 日次データを既存Gistにリレー（スマホ閲覧用、ブリーフィングと同方式） ──
+const GARMIN_GIST_FILENAME = 'selfcare_garmin.json';
+
+function saveGarminToGist(garminData) {
+  const token = getSyncToken();
+  const gistId = getSyncGistId();
+  if (!token || !gistId || !garminData) return Promise.resolve();
+  const payload = { ...garminData, _uploadedAt: new Date().toISOString() };
+  return fetch('https://api.github.com/gists/' + gistId, {
+    method: 'PATCH',
+    headers: { 'Authorization': 'token ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      files: { [GARMIN_GIST_FILENAME]: { content: JSON.stringify(payload) } }
+    })
+  }).catch(() => {});
+}
+
+function loadGarminFromGist() {
+  const token = getSyncToken();
+  const gistId = getSyncGistId();
+  if (!token || !gistId) return Promise.resolve(null);
+  return fetch('https://api.github.com/gists/' + gistId, {
+    headers: { 'Authorization': 'token ' + token }
+  })
+    .then(res => res.ok ? res.json() : null)
+    .then(data => {
+      if (!data) return null;
+      const file = data.files && data.files[GARMIN_GIST_FILENAME];
+      if (!file || !file.content) return null;
+      try { return JSON.parse(file.content); } catch { return null; }
+    })
+    .catch(() => null);
+}
+
+// Garmin取得の共通入口: PCは /api/garmin（成功時はGistへ中継）、スマホはGistから読む
+function fetchGarminData() {
+  return fetch('/api/garmin')
+    .then(r => r.ok ? r.json() : null)
+    .then(g => {
+      if (g && (g.latest || (g.rows && g.rows.length))) {
+        saveGarminToGist(g);
+        return g;
+      }
+      throw new Error('backend unavailable');
+    })
+    .catch(() => loadGarminFromGist());
+}
+
 let _syncTimer = null;
 
 function _get(key) {
@@ -1143,7 +1191,20 @@ function Home({ navigate }) {
   const [priorityItems, setPriorityItems] = useState([]);
   const [briefing, setBriefing] = useState(null);
   const [briefingLoading, setBriefingLoading] = useState(false);
+  const [garmin, setGarmin] = useState(null);
+  const [garminRows, setGarminRows] = useState([]);
   const [toastEl, showToast] = useToast();
+
+  const loadGarmin = useCallback(() => {
+    // PC: /api/garmin（Gistへ中継）／スマホ: Gistから読む
+    fetchGarminData()
+      .then(g => {
+        if (!g) return;
+        if (g.latest) setGarmin(g.latest);
+        if (g.rows) setGarminRows(g.rows);
+      })
+      .catch(() => {});
+  }, []);
 
   const loadBriefing = useCallback(() => {
     // まずローカル server.py を試す（PC）
@@ -1210,6 +1271,7 @@ function Home({ navigate }) {
       fetchWeatherForecast().then(f => { if (f) setForecast(f); });
       refresh();
       loadBriefing();
+      loadGarmin();
     };
     refreshAll();
 
@@ -1429,6 +1491,96 @@ function Home({ navigate }) {
         </div>
       )}
 
+      {/* 今日のフィジカル（Garmin） */}
+      {garmin && (() => {
+        const sm = garmin.sleepMinutes;
+        const sleepStr = (sm != null) ? `${Math.floor(sm/60)}h ${sm%60}m` : null;
+        const score = garmin.sleepScore;
+        const scoreColor = score == null ? 'var(--dim)'
+          : score >= 80 ? 'var(--accent)'
+          : score >= 60 ? 'var(--orange)'
+          : 'var(--red, #e06)';
+        // 安静時心拍: 7日平均との差で色付け（低い=回復良好）
+        const hrDelta = (garmin.restingHr != null && garmin.restingHr7d != null)
+          ? garmin.restingHr - garmin.restingHr7d : null;
+        const hrColor = hrDelta == null ? undefined
+          : hrDelta <= 0 ? 'var(--accent)'
+          : hrDelta >= 4 ? 'var(--orange)'
+          : undefined;
+        // ストレス: Garmin基準（〜25 休息 / 〜50 低 / 〜75 中 / 76〜 高）
+        const st = garmin.stress;
+        const stColor = st == null ? undefined
+          : st <= 25 ? 'var(--accent)'
+          : st <= 50 ? undefined
+          : 'var(--orange)';
+        const Stat = ({ label, value, unit, color, sub }) => (
+          <div style={{ flex: '1 1 70px', minWidth: 64 }}>
+            <div style={{ fontSize: '0.62rem', color: 'var(--dim)', marginBottom: 1 }}>{label}</div>
+            <div style={{ fontSize: '1.05rem', fontWeight: 700, color: color || 'var(--text)', lineHeight: 1.2 }}>
+              {value != null ? value : '—'}
+              {value != null && unit ? <span style={{ fontSize: '0.6rem', fontWeight: 500, color: 'var(--dim)', marginLeft: 1 }}>{unit}</span> : null}
+            </div>
+            {sub && <div style={{ fontSize: '0.58rem', color: 'var(--dim)', marginTop: 1 }}>{sub}</div>}
+          </div>
+        );
+        // 直近14日のミニ推移（スパークライン）
+        const spark14 = garminRows.slice(-14);
+        const Spark = ({ label, color, get }) => {
+          const data = spark14.map(get);
+          const vals = data.filter(v => v != null);
+          if (vals.length < 2) return null;
+          let min = Math.min(...vals), max = Math.max(...vals);
+          if (min === max) { min -= 1; max += 1; }
+          const pts = data.map((v, i) => v == null ? null
+            : `${(64 * i / (data.length - 1)).toFixed(1)},${(18 - 16 * (v - min) / (max - min) + 1).toFixed(1)}`)
+            .filter(Boolean).join(' ');
+          return (
+            <div style={{ flex: '1 1 90px', minWidth: 84 }}>
+              <div style={{ fontSize: '0.58rem', color: 'var(--dim)', marginBottom: 2 }}>{label}</div>
+              <svg viewBox="0 0 64 20" style={{ width: '100%', height: 20, display: 'block' }}>
+                <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5"
+                  strokeLinejoin="round" strokeLinecap="round"/>
+              </svg>
+            </div>
+          );
+        };
+        return (
+          <div className="card">
+            <div className="card-title" style={{ marginBottom: 8 }}>
+              <span>⌚ 今日のフィジカル</span>
+              <span style={{ fontSize: '0.68rem', color: 'var(--dim)', fontWeight: 500 }}>{garmin.date}</span>
+            </div>
+            {(garmin.bedTime || garmin.wakeTime) && (
+              <div style={{ fontSize: '0.78rem', color: 'var(--dim)', marginBottom: 8 }}>
+                🛏 {garmin.bedTime || '—'} 〜 {garmin.wakeTime || '—'}
+                {sleepStr && <span style={{ marginLeft: 8, color: 'var(--text)' }}>（{sleepStr}）</span>}
+              </div>
+            )}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, rowGap: 12 }}>
+              <Stat label="睡眠スコア" value={score} color={scoreColor}/>
+              <Stat label="安静時心拍" value={garmin.restingHr} unit="bpm" color={hrColor}
+                sub={hrDelta != null ? `7日平均${hrDelta > 0 ? '+' : ''}${hrDelta}` : null}/>
+              <Stat label="歩数" value={garmin.steps != null ? garmin.steps.toLocaleString() : null}/>
+              <Stat label="ストレス" value={st} color={stColor}/>
+              <Stat label="消費kcal" value={garmin.calories != null ? garmin.calories.toLocaleString() : null}/>
+            </div>
+            {spark14.length >= 2 && (
+              <div style={{ display: 'flex', gap: 12, marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+                <Spark label="睡眠スコア 14日" color="var(--accent)" get={r => r.sleepScore}/>
+                <Spark label="消費kcal 14日" color="var(--orange)" get={r => r.calories}/>
+                <Spark label="歩数 14日" color="#9ece6a" get={r => r.steps}/>
+              </div>
+            )}
+            <button onClick={() => navigate('physical')}
+              style={{ width: '100%', marginTop: 10, padding: '7px 0', borderRadius: 8,
+                       border: '1px solid var(--border)', background: 'var(--card2)', color: 'var(--accent)',
+                       fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}>
+              📈 推移をくわしく見る
+            </button>
+          </div>
+        );
+      })()}
+
       {/* 朝活ストリーク */}
       <div className="card">
         <div className="card-title" style={{ marginBottom: 8 }}>
@@ -1603,6 +1755,30 @@ function Home({ navigate }) {
 }
 
 // ═════════════════════════════
+//  Garmin 時刻 → ログselect値へ変換
+// ═════════════════════════════
+// 起床(朝ログ): 15分刻みに丸め、04:00-12:00の範囲外は''
+function garminWakeToSelect(hhmm) {
+  if (!hhmm || !hhmm.includes(':')) return '';
+  const [h, m] = hhmm.split(':').map(Number);
+  const total = Math.round((h*60 + m) / 15) * 15;
+  const H = Math.floor(total/60), M = total%60;
+  if (H < 4 || H > 12) return '';
+  return `${String(H).padStart(2,'0')}:${String(M).padStart(2,'0')}`;
+}
+// 就寝(夜ログ): 0:00〜深夜の就寝は翌日扱い(+24h)。20:00-28:00表記、範囲外は''
+function garminBedToSelect(hhmm) {
+  if (!hhmm || !hhmm.includes(':')) return '';
+  const [h, m] = hhmm.split(':').map(Number);
+  let total = h*60 + m;
+  if (h < 18) total += 24*60;
+  total = Math.round(total/15) * 15;
+  const H = Math.floor(total/60), M = total%60;
+  if (H < 20 || H > 28 || (H === 28 && M > 0)) return '';
+  return `${String(H).padStart(2,'0')}:${String(M).padStart(2,'0')}`;
+}
+
+// ═════════════════════════════
 //  Log Form
 // ═════════════════════════════
 function LogForm({ initialTab, initialDate }) {
@@ -1642,6 +1818,19 @@ function LogForm({ initialTab, initialDate }) {
     setDiary(d?.content || '');
     setIsDirtyM(false);
     setIsDirtyN(false);
+
+    // Garmin: 起床・就寝が空欄なら自動補完（手入力済みは上書きしない）
+    fetchGarminData()
+      .then(g => {
+        if (!g || !g.rows) return;
+        const row = g.rows.find(x => x.date === date);
+        if (!row) return;
+        const wake = garminWakeToSelect(row.wakeTime);
+        const bed = garminBedToSelect(row.bedTime);
+        if (wake && !(m && m.wakeTime)) { setMorning(prev => ({ ...prev, wakeTime: wake })); setIsDirtyM(true); }
+        if (bed && !(n && n.bedTime)) { setNight(prev => ({ ...prev, bedTime: bed })); setIsDirtyN(true); }
+      })
+      .catch(() => {});
   }, [date]);
 
   function saveMorning() {
@@ -2164,6 +2353,13 @@ function TodoPage() {
 function HistoryPage() {
   const [date, setDate] = useState(DB.today());
   const [copyMsg, setCopyMsg] = useState('');
+  const [garminRows, setGarminRows] = useState([]);
+
+  useEffect(() => {
+    fetchGarminData()
+      .then(g => { if (g && g.rows) setGarminRows(g.rows); })
+      .catch(() => {});
+  }, []);
 
   const mLog = DB.getLogByDate(date, 'morning');
   const nLog = DB.getLogByDate(date, 'night');
@@ -2171,7 +2367,8 @@ function HistoryPage() {
   const weather = DB.getWeatherByDate(date);
   const todos = DB.getTodos().filter(t => t.dueDate === date);
   const dayMurmurs = DB.getMurmursByDate(date);
-  const hasData = mLog || nLog || diary || weather || todos.length > 0 || dayMurmurs.length > 0;
+  const garminDay = garminRows.find(r => r.date === date);
+  const hasData = mLog || nLog || diary || weather || todos.length > 0 || dayMurmurs.length > 0 || garminDay;
 
   const generateAIReport = () => {
     const logs = JSON.parse(localStorage.getItem('selfcare_logs') || '[]');
@@ -2374,6 +2571,22 @@ function HistoryPage() {
           {nLog.reflection && <Field label="振り返り" value={nLog.reflection}/>}
         </div>
       )}
+
+      {garminDay && (() => {
+        const sm = garminDay.sleepMinutes;
+        const sleepStr = sm != null
+          ? `${Math.floor(sm / 60)}h ${sm % 60}m` + (garminDay.bedTime && garminDay.wakeTime ? `（${garminDay.bedTime} 〜 ${garminDay.wakeTime}）` : '')
+          : null;
+        return (
+          <div className="card">
+            <div className="card-title">⌚ GARMIN</div>
+            <Field label="睡眠時間" value={sleepStr}/>
+            <Field label="睡眠スコア" value={garminDay.sleepScore}/>
+            <Field label="歩数" value={garminDay.steps != null ? garminDay.steps.toLocaleString() + ' 歩' : null}/>
+            <Field label="消費カロリー" value={garminDay.calories != null ? garminDay.calories.toLocaleString() + ' kcal' : null}/>
+          </div>
+        );
+      })()}
 
       {todos.length > 0 && (
         <div className="card">
@@ -2876,6 +3089,187 @@ function SettingsPage() {
 }
 
 // ═════════════════════════════
+//  Physical（フィジカル推移）
+// ═════════════════════════════
+function TrendChart({ labels, series, height = 110 }) {
+  const W = 320, H = height, padL = 4, padR = 30, padT = 10, padB = 16;
+  const all = series.flatMap(s => s.data).filter(v => v != null);
+  if (!all.length) return <div style={{ color: 'var(--dim)', fontSize: '0.75rem', padding: '12px 0' }}>まだデータがありません</div>;
+  let min = Math.min(...all), max = Math.max(...all);
+  if (min === max) { min -= 1; max += 1; }
+  const pad = (max - min) * 0.1;
+  min -= pad; max += pad;
+  const n = labels.length;
+  const x = i => padL + (n <= 1 ? (W - padL - padR) / 2 : (W - padL - padR) * i / (n - 1));
+  const y = v => padT + (H - padT - padB) * (1 - (v - min) / (max - min));
+  const fmt = v => (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString() : Math.round(v * 10) / 10);
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', display: 'block' }}>
+      {[max - pad, min + pad].map((v, i) => (
+        <g key={i}>
+          <line x1={padL} x2={W - padR} y1={y(v)} y2={y(v)} stroke="var(--border)" strokeWidth="0.5" strokeDasharray="3 3"/>
+          <text x={W - padR + 3} y={y(v) + 3} fontSize="8.5" fill="var(--dim)">{fmt(v)}</text>
+        </g>
+      ))}
+      {series.map((s, si) => {
+        const segs = [];
+        let cur = [];
+        s.data.forEach((v, i) => {
+          if (v == null) { if (cur.length) segs.push(cur); cur = []; }
+          else cur.push([x(i), y(v)]);
+        });
+        if (cur.length) segs.push(cur);
+        const lastSeg = segs[segs.length - 1];
+        const lastPt = lastSeg && lastSeg[lastSeg.length - 1];
+        return (
+          <g key={si}>
+            {segs.map((seg, gi) => seg.length === 1
+              ? <circle key={gi} cx={seg[0][0]} cy={seg[0][1]} r="2.5" fill={s.color}/>
+              : <polyline key={gi} points={seg.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ')}
+                  fill="none" stroke={s.color} strokeWidth={s.thin ? 1 : 2}
+                  strokeDasharray={s.dashed ? '4 3' : undefined}
+                  strokeLinejoin="round" strokeLinecap="round"/>
+            )}
+            {lastPt && !s.thin && <circle cx={lastPt[0]} cy={lastPt[1]} r="3" fill={s.color}/>}
+          </g>
+        );
+      })}
+      <text x={padL} y={H - 4} fontSize="8.5" fill="var(--dim)">{labels[0]}</text>
+      <text x={W - padR} y={H - 4} fontSize="8.5" fill="var(--dim)" textAnchor="end">{labels[n - 1]}</text>
+    </svg>
+  );
+}
+
+function TrendCard({ title, unit, rows, series, formatVal }) {
+  const labels = rows.map(r => (r.date || '').slice(5));
+  const sdata = series.map(s => ({ ...s, data: rows.map(r => s.get(r)) }));
+  const main = sdata[0];
+  const vals = main.data.filter(v => v != null);
+  const latest = [...main.data].reverse().find(v => v != null);
+  const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+  const fv = formatVal || (v => v == null ? '—' : Math.round(v).toLocaleString());
+  return (
+    <div className="card">
+      <div className="card-title" style={{ marginBottom: 6 }}>
+        <span>{title}</span>
+        <span style={{ fontSize: '0.7rem', color: 'var(--dim)', fontWeight: 500 }}>
+          最新 <b style={{ color: main.color, fontSize: '0.85rem' }}>{fv(latest)}</b>{unit}
+          <span style={{ margin: '0 4px' }}>／</span>平均 {fv(avg)}{unit}
+        </span>
+      </div>
+      <TrendChart labels={labels} series={sdata}/>
+      {sdata.length > 1 && (
+        <div style={{ display: 'flex', gap: 12, marginTop: 4, fontSize: '0.65rem', color: 'var(--dim)' }}>
+          {sdata.map((s, i) => (
+            <span key={i}><span style={{ color: s.color }}>―</span> {s.label}</span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PhysicalPage({ navigate }) {
+  const [rows, setRows] = useState(null);
+  const [span, setSpan] = useState(14);
+
+  useEffect(() => {
+    fetchGarminData()
+      .then(g => setRows((g && g.rows) || []))
+      .catch(() => setRows([]));
+  }, []);
+
+  if (rows === null) return (
+    <div className="page">
+      <div style={{ color: 'var(--dim)', fontSize: '0.85rem', padding: 24, textAlign: 'center' }}>読み込み中...</div>
+    </div>
+  );
+
+  const shown = span ? rows.slice(-span) : rows;
+  const avgOf = get => {
+    const vs = shown.map(get).filter(v => v != null);
+    return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null;
+  };
+  const sleepAvg = avgOf(r => r.sleepMinutes);
+  const sleepAvgStr = sleepAvg != null ? `${Math.floor(sleepAvg / 60)}h${String(Math.round(sleepAvg % 60)).padStart(2, '0')}m` : '—';
+  const fmtH = v => v == null ? '—' : v.toFixed(1);
+
+  return (
+    <div className="page">
+      <Header
+        title="📈 フィジカル推移"
+        right={
+          <button onClick={() => navigate('home')}
+            style={{ border: '1px solid var(--border)', background: 'var(--card2)', color: 'var(--dim)',
+                     borderRadius: 8, padding: '4px 10px', fontSize: '0.75rem', cursor: 'pointer', fontFamily: 'inherit' }}>
+            ← ホーム
+          </button>
+        }
+      />
+
+      <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+        {[[14, '14日'], [30, '30日'], [0, '全期間']].map(([v, label]) => (
+          <button key={v} onClick={() => setSpan(v)}
+            style={{
+              flex: 1, padding: '5px 0', borderRadius: 8, fontFamily: 'inherit', fontSize: '0.75rem', cursor: 'pointer',
+              border: '1px solid ' + (span === v ? 'var(--accent)' : 'var(--border)'),
+              background: span === v ? 'rgba(0,200,150,0.12)' : 'var(--card2)',
+              color: span === v ? 'var(--accent)' : 'var(--dim)', fontWeight: span === v ? 700 : 500,
+            }}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      <div className="card">
+        <div className="card-title" style={{ marginBottom: 8 }}>
+          <span>この期間の平均（{shown.length}日分）</span>
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, rowGap: 12 }}>
+          {[
+            ['睡眠', sleepAvgStr],
+            ['睡眠スコア', avgOf(r => r.sleepScore), v => Math.round(v)],
+            ['歩数', avgOf(r => r.steps), v => Math.round(v).toLocaleString()],
+            ['消費kcal', avgOf(r => r.calories), v => Math.round(v).toLocaleString()],
+            ['安静時心拍', avgOf(r => r.restingHr), v => Math.round(v)],
+          ].map(([label, v, f]) => (
+            <div key={label} style={{ flex: '1 1 70px', minWidth: 64 }}>
+              <div style={{ fontSize: '0.62rem', color: 'var(--dim)', marginBottom: 1 }}>{label}</div>
+              <div style={{ fontSize: '1.05rem', fontWeight: 700, lineHeight: 1.2 }}>
+                {v == null ? '—' : (f ? f(v) : v)}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <TrendCard title="😴 睡眠スコア" rows={shown}
+        series={[{ label: 'スコア', color: 'var(--accent)', get: r => r.sleepScore }]}/>
+      <TrendCard title="🛏 睡眠時間" unit="h" rows={shown} formatVal={fmtH}
+        series={[{ label: '時間', color: '#7aa2f7', get: r => r.sleepMinutes != null ? Math.round(r.sleepMinutes / 6) / 10 : null }]}/>
+      <TrendCard title="🔥 消費カロリー" unit="kcal" rows={shown}
+        series={[
+          { label: '合計', color: 'var(--orange)', get: r => r.calories },
+          { label: '運動分', color: '#e0af68', thin: true, dashed: true, get: r => r.caloriesActive },
+        ]}/>
+      <TrendCard title="❤️ 安静時心拍" unit="bpm" rows={shown}
+        series={[
+          { label: '当日', color: '#f7768e', get: r => r.restingHr },
+          { label: '7日平均', color: 'var(--dim)', thin: true, dashed: true, get: r => r.restingHr7d },
+        ]}/>
+      <TrendCard title="😰 ストレスレベル" rows={shown}
+        series={[{ label: 'ストレス', color: '#bb9af7', get: r => r.stress }]}/>
+      <TrendCard title="🚶 歩数" unit="歩" rows={shown}
+        series={[{ label: '歩数', color: '#9ece6a', get: r => r.steps }]}/>
+
+      <div style={{ fontSize: '0.68rem', color: 'var(--dim)', textAlign: 'center', margin: '4px 0 12px' }}>
+        ⌚ データはGarminから毎日9:00に自動取得されます
+      </div>
+    </div>
+  );
+}
+
+// ═════════════════════════════
 //  App Root
 // ═════════════════════════════
 const Icons = {
@@ -2934,6 +3328,7 @@ function App() {
       case 'todo':     return <TodoPage/>;
       case 'murmur':   return <MurmurPage/>;
       case 'history':  return <HistoryPage/>;
+      case 'physical': return <PhysicalPage navigate={navigate}/>;
       case 'settings': return <SettingsPage/>;
       default:         return <Home navigate={navigate}/>;
     }
