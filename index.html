@@ -1646,6 +1646,10 @@ function Home({ navigate }) {
               <Stat label="歩数" value={day.steps != null ? day.steps.toLocaleString() : null}/>
               <Stat label="ストレス" value={st} color={stColor}/>
               <Stat label="消費kcal" value={day.calories != null ? day.calories.toLocaleString() : null}/>
+              {day.weightKg != null && (
+                <Stat label="体重" value={day.weightKg} unit="kg"
+                  sub={day.bodyFatPct != null ? `体脂肪 ${day.bodyFatPct}%` : null}/>
+              )}
             </div>
             {spark14.length >= 2 && (
               <div style={{ display: 'flex', gap: 12, marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
@@ -3354,6 +3358,19 @@ function PhysicalPage({ navigate }) {
         series={[{ label: 'ストレス', color: '#bb9af7', get: r => r.stress }]}/>
       <TrendCard title="🚶 歩数" unit="歩" rows={shown}
         series={[{ label: '歩数', color: '#9ece6a', get: r => r.steps }]}/>
+      {shown.some(r => r.weightKg != null) && (
+        <TrendCard title="⚖️ 体重・筋肉量" unit="kg" rows={shown}
+          formatVal={v => v == null ? '—' : v.toFixed(1)}
+          series={[
+            { label: '体重', color: '#e0af68', get: r => r.weightKg },
+            { label: '筋肉量', color: '#9ece6a', thin: true, dashed: true, get: r => r.muscleMassKg },
+          ]}/>
+      )}
+      {shown.some(r => r.bodyFatPct != null) && (
+        <TrendCard title="💧 体脂肪率" unit="%" rows={shown}
+          formatVal={v => v == null ? '—' : v.toFixed(1)}
+          series={[{ label: '体脂肪率', color: '#f7768e', get: r => r.bodyFatPct }]}/>
+      )}
 
       <div style={{ fontSize: '0.68rem', color: 'var(--dim)', textAlign: 'center', margin: '4px 0 12px' }}>
         ⌚ Garminから自動更新（PC: 毎朝9時 ／ クラウド: 3時間ごと）
