@@ -1065,6 +1065,13 @@ function XPBar() {
 }
 
 // ── Weekly Calendar (直近7日) ──
+// Garmin自動作成ログ（起床・就寝だけの骨組み）を「ログ済み」に数えないための判定
+function isRealLog(l) {
+  if (!l) return false;
+  const meta = ['id', 'date', 'type', 'wakeTime', 'bedTime', 'garminAuto', 'createdAt', 'updatedAt'];
+  return Object.keys(l).some(k => !meta.includes(k) && l[k] != null && l[k] !== '');
+}
+
 function WeeklyCalendar({ onDayClick }) {
   const days = ['日','月','火','水','木','金','土'];
   const today = DB.today();
@@ -1073,8 +1080,8 @@ function WeeklyCalendar({ onDayClick }) {
     const m = DB.getLogByDate(date, 'morning');
     const n = DB.getLogByDate(date, 'night');
     const hasActivity = m?.morningActivity === 'yes';
-    const hasBoth = !!m && !!n;
-    const hasAny = !!m || !!n;
+    const hasBoth = isRealLog(m) && isRealLog(n);
+    const hasAny = isRealLog(m) || isRealLog(n);
     const d = new Date(date + 'T00:00:00');
     const dayLabel = days[d.getDay()];
     const dayNum = d.getDate();
@@ -1291,7 +1298,7 @@ function Home({ navigate }) {
     const morning = DB.getLogByDate(today, 'morning');
     const night   = DB.getLogByDate(today, 'night');
     const diary   = DB.getDiaryByDate(today);
-    setStatus({ morning: !!morning, night: !!night, diary: !!diary });
+    setStatus({ morning: isRealLog(morning), night: isRealLog(night), diary: !!diary });
     setPriorityItems(DB.getTodayPriorityCats());
     setActivityStats(DB.getMorningActivityStats());
   }, []);
@@ -1901,13 +1908,14 @@ function LogForm({ initialTab, initialDate }) {
     setIsDirtyN(false);
 
     // Garmin: 起床・就寝が空欄なら自動補完（手入力済みは上書きしない）
+    // 起床=その日のGarmin行 / 就寝=翌日のGarmin行（Garminの日付は起床日のため）
     fetchGarminData()
       .then(g => {
         if (!g || !g.rows) return;
         const row = g.rows.find(x => x.date === date);
-        if (!row) return;
-        const wake = garminWakeToSelect(row.wakeTime);
-        const bed = garminBedToSelect(row.bedTime);
+        const rowNext = g.rows.find(x => x.date === DB.shiftDate(date, 1));
+        const wake = row ? garminWakeToSelect(row.wakeTime) : '';
+        const bed = rowNext ? garminBedToSelect(rowNext.bedTime) : '';
         if (wake && !(m && m.wakeTime)) { setMorning(prev => ({ ...prev, wakeTime: wake })); setIsDirtyM(true); }
         if (bed && !(n && n.bedTime)) { setNight(prev => ({ ...prev, bedTime: bed })); setIsDirtyN(true); }
       })
@@ -2449,7 +2457,7 @@ function HistoryPage() {
   const todos = DB.getTodos().filter(t => t.dueDate === date);
   const dayMurmurs = DB.getMurmursByDate(date);
   const garminDay = garminRows.find(r => r.date === date);
-  const hasData = mLog || nLog || diary || weather || todos.length > 0 || dayMurmurs.length > 0 || garminDay;
+  const hasData = isRealLog(mLog) || isRealLog(nLog) || diary || weather || todos.length > 0 || dayMurmurs.length > 0 || garminDay;
 
   const generateAIReport = () => {
     const logs = JSON.parse(localStorage.getItem('selfcare_logs') || '[]');
@@ -2618,7 +2626,7 @@ function HistoryPage() {
         </div>
       )}
 
-      {mLog && (
+      {isRealLog(mLog) && (
         <div className="card">
           <div className="card-title">☀️ MORNING LOG</div>
           <Field label="起床" value={mLog.wakeTime}/>
@@ -2635,7 +2643,7 @@ function HistoryPage() {
         </div>
       )}
 
-      {nLog && (
+      {isRealLog(nLog) && (
         <div className="card">
           <div className="card-title">🌙 NIGHT LOG</div>
           <Field label="就寝" value={nLog.bedTime}/>
