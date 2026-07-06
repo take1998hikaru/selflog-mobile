@@ -1621,6 +1621,8 @@ function Home({ navigate }) {
         const idx = Math.min(garminIdx, rowsArr.length - 1);
         const day = rowsArr[rowsArr.length - 1 - idx];
         const relLabel = idx === 0 ? '今日' : idx === 1 ? '昨日' : idx === 2 ? '一昨日' : `${idx}日前`;
+        const dayWorkouts = hevyWorkouts.filter(w => w.date === day.date);
+        const daySets = dayWorkouts.reduce((a, w) => a + (w.setCount || 0), 0);
         const sm = day.sleepMinutes;
         const sleepStr = (sm != null) ? `${Math.floor(sm/60)}h ${sm%60}m` : null;
         const score = day.sleepScore;
@@ -1697,14 +1699,19 @@ function Home({ navigate }) {
                 {sleepStr && <span style={{ marginLeft: 8, color: 'var(--text)' }}>（{sleepStr}）</span>}
               </div>
             )}
-            {hevyWorkouts.filter(w => w.date === day.date).map((w, i) => (
+            {dayWorkouts.map((w, i) => (
               <div key={i} style={{ fontSize: '0.78rem', color: 'var(--dim)', marginBottom: 8 }}>
-                🏋️ <span style={{ color: 'var(--text)', fontWeight: 600 }}>{w.title || '筋トレ'}</span>
-                {w.minutes != null && <span style={{ marginLeft: 6 }}>{w.minutes}分</span>}
-                {w.exerciseCount != null && w.setCount != null &&
-                  <span style={{ marginLeft: 6 }}>{w.exerciseCount}種目{w.setCount}セット</span>}
-                {w.volumeKg != null && w.volumeKg > 0 &&
-                  <span style={{ marginLeft: 6, color: 'var(--accent)' }}>総挙上 {w.volumeKg.toLocaleString()}kg</span>}
+                <div>
+                  🏋️ <span style={{ color: 'var(--text)', fontWeight: 600 }}>{w.title || '筋トレ'}</span>
+                  {w.minutes != null && <span style={{ marginLeft: 6 }}>{w.minutes}分</span>}
+                  {w.exerciseCount != null && w.setCount != null &&
+                    <span style={{ marginLeft: 6 }}>{w.exerciseCount}種目{w.setCount}セット</span>}
+                  {w.volumeKg != null && w.volumeKg > 0 &&
+                    <span style={{ marginLeft: 6, color: 'var(--accent)' }}>総挙上 {w.volumeKg.toLocaleString()}kg</span>}
+                </div>
+                {(w.summary || '').split('／').filter(Boolean).map((s, j) => (
+                  <div key={j} style={{ fontSize: '0.68rem', marginTop: 2, paddingLeft: 18 }}>{s}</div>
+                ))}
               </div>
             ))}
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, rowGap: 12 }}>
@@ -1714,6 +1721,9 @@ function Home({ navigate }) {
               <Stat label="歩数" value={day.steps != null ? day.steps.toLocaleString() : null}/>
               <Stat label="ストレス" value={st} color={stColor}/>
               <Stat label="消費kcal" value={day.calories != null ? day.calories.toLocaleString() : null}/>
+              <Stat label="筋トレ" value={dayWorkouts.length ? 'あり' : 'なし'}
+                color={dayWorkouts.length ? 'var(--accent)' : 'var(--dim)'}
+                sub={dayWorkouts.length ? `${daySets}セット` : null}/>
               {day.weightKg != null && (
                 <Stat label="体重" value={day.weightKg} unit="kg"
                   sub={day.bodyFatPct != null ? `体脂肪 ${day.bodyFatPct}%` : null}/>
@@ -3334,6 +3344,7 @@ function PhysicalPage({ navigate }) {
   const [rows, setRows] = useState(null);
   const [span, setSpan] = useState(14);
   const [updatedAt, setUpdatedAt] = useState(null);
+  const [hevy, setHevy] = useState([]);
 
   useEffect(() => {
     fetchGarminData()
@@ -3342,6 +3353,9 @@ function PhysicalPage({ navigate }) {
         setUpdatedAt(g ? (g._uploadedAt || g.updatedAt || null) : null);
       })
       .catch(() => setRows([]));
+    fetchHevyData()
+      .then(h => { if (h && h.workouts) setHevy(h.workouts); })
+      .catch(() => {});
   }, []);
 
   if (rows === null) return (
@@ -3358,6 +3372,9 @@ function PhysicalPage({ navigate }) {
   const sleepAvg = avgOf(r => r.sleepMinutes);
   const sleepAvgStr = sleepAvg != null ? `${Math.floor(sleepAvg / 60)}h${String(Math.round(sleepAvg % 60)).padStart(2, '0')}m` : '—';
   const fmtH = v => v == null ? '—' : v.toFixed(1);
+  // 表示期間内の筋トレ（Hevy）。shown は日付昇順なので先頭日以降で絞る
+  const minDate = shown.length ? shown[0].date : null;
+  const hevyShown = hevy.filter(w => w.date && (!minDate || w.date >= minDate));
 
   return (
     <div className="page">
@@ -3397,6 +3414,7 @@ function PhysicalPage({ navigate }) {
             ['歩数', avgOf(r => r.steps), v => Math.round(v).toLocaleString()],
             ['消費kcal', avgOf(r => r.calories), v => Math.round(v).toLocaleString()],
             ['安静時心拍', avgOf(r => r.restingHr), v => Math.round(v)],
+            ['筋トレ', hevyShown.length || null, v => `${v}回`],
           ].map(([label, v, f]) => (
             <div key={label} style={{ flex: '1 1 70px', minWidth: 64 }}>
               <div style={{ fontSize: '0.62rem', color: 'var(--dim)', marginBottom: 1 }}>{label}</div>
@@ -3407,6 +3425,33 @@ function PhysicalPage({ navigate }) {
           ))}
         </div>
       </div>
+
+      {hevyShown.length > 0 && (
+        <div className="card">
+          <div className="card-title" style={{ marginBottom: 4 }}>
+            <span>🏋️ 筋トレ記録（Hevy）</span>
+            <span style={{ fontSize: '0.7rem', color: 'var(--dim)', fontWeight: 500 }}>
+              この期間 <b style={{ color: 'var(--accent)', fontSize: '0.85rem' }}>{hevyShown.length}</b>回
+            </span>
+          </div>
+          {[...hevyShown].reverse().map((w, i) => (
+            <div key={w.id || i} style={{ padding: '8px 0', borderTop: i ? '1px solid var(--border)' : 'none' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                <span style={{ fontSize: '0.82rem', fontWeight: 600 }}>{w.title || '筋トレ'}</span>
+                <span style={{ fontSize: '0.68rem', color: 'var(--dim)' }}>{(w.date || '').slice(5).replace('-', '/')}</span>
+              </div>
+              <div style={{ fontSize: '0.68rem', color: 'var(--dim)', marginTop: 2 }}>
+                {w.minutes != null && `${w.minutes}分`}
+                {w.exerciseCount != null && w.setCount != null && `・${w.exerciseCount}種目${w.setCount}セット`}
+                {w.volumeKg > 0 && <span style={{ color: 'var(--accent)' }}>・総挙上 {w.volumeKg.toLocaleString()}kg</span>}
+              </div>
+              {(w.summary || '').split('／').filter(Boolean).map((s, j) => (
+                <div key={j} style={{ fontSize: '0.72rem', marginTop: 2 }}>・{s}</div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
 
       <TrendCard title="😴 睡眠スコア" rows={shown}
         series={[{ label: 'スコア', color: 'var(--accent)', get: r => r.sleepScore }]}/>
