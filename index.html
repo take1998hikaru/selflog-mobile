@@ -124,6 +124,54 @@ function fetchGarminData() {
     .catch(() => loadGarminFromGist());
 }
 
+// ── Hevy 筋トレデータを既存Gistにリレー（スマホ閲覧用、Garminと同方式） ──
+const HEVY_GIST_FILENAME = 'selfcare_hevy.json';
+
+function saveHevyToGist(hevyData) {
+  const token = getSyncToken();
+  const gistId = getSyncGistId();
+  if (!token || !gistId || !hevyData) return Promise.resolve();
+  const payload = { ...hevyData, _uploadedAt: new Date().toISOString() };
+  return fetch('https://api.github.com/gists/' + gistId, {
+    method: 'PATCH',
+    headers: { 'Authorization': 'token ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      files: { [HEVY_GIST_FILENAME]: { content: JSON.stringify(payload) } }
+    })
+  }).catch(() => {});
+}
+
+function loadHevyFromGist() {
+  const token = getSyncToken();
+  const gistId = getSyncGistId();
+  if (!token || !gistId) return Promise.resolve(null);
+  return fetch('https://api.github.com/gists/' + gistId, {
+    headers: { 'Authorization': 'token ' + token }
+  })
+    .then(res => res.ok ? res.json() : null)
+    .then(data => {
+      if (!data) return null;
+      const file = data.files && data.files[HEVY_GIST_FILENAME];
+      if (!file || !file.content) return null;
+      try { return JSON.parse(file.content); } catch { return null; }
+    })
+    .catch(() => null);
+}
+
+// Hevy取得の共通入口: PCは /api/hevy（成功時はGistへ中継）、スマホはGistから読む
+function fetchHevyData() {
+  return fetch('/api/hevy')
+    .then(r => r.ok ? r.json() : null)
+    .then(h => {
+      if (h && h.workouts && h.workouts.length) {
+        saveHevyToGist(h);
+        return h;
+      }
+      throw new Error('backend unavailable');
+    })
+    .catch(() => loadHevyFromGist());
+}
+
 let _syncTimer = null;
 
 function _get(key) {
@@ -1065,10 +1113,11 @@ function XPBar() {
 }
 
 // ── Weekly Calendar (直近7日) ──
-// Garmin自動作成ログ（起床・就寝だけの骨組み）を「ログ済み」に数えないための判定
+// Garmin/Hevy自動作成ログ（起床・就寝・運動だけの骨組み）を「ログ済み」に数えないための判定
 function isRealLog(l) {
   if (!l) return false;
   const meta = ['id', 'date', 'type', 'wakeTime', 'bedTime', 'garminAuto', 'createdAt', 'updatedAt'];
+  if (l.hevyAuto) meta.push('hevyAuto', 'exercise', 'exerciseDone');
   return Object.keys(l).some(k => !meta.includes(k) && l[k] != null && l[k] !== '');
 }
 
@@ -1205,6 +1254,7 @@ function Home({ navigate }) {
   const [garminRows, setGarminRows] = useState([]);
   const [garminUpdatedAt, setGarminUpdatedAt] = useState(null);
   const [garminIdx, setGarminIdx] = useState(0); // 0=最新日, 1=前日, 2=前々日…
+  const [hevyWorkouts, setHevyWorkouts] = useState([]);
   const [toastEl, showToast] = useToast();
 
   const loadGarmin = useCallback(() => {
@@ -1216,6 +1266,13 @@ function Home({ navigate }) {
         if (g.rows) setGarminRows(g.rows);
         setGarminUpdatedAt(g._uploadedAt || g.updatedAt || null);
       })
+      .catch(() => {});
+  }, []);
+
+  const loadHevy = useCallback(() => {
+    // PC: /api/hevy（Gistへ中継）／スマホ: Gistから読む
+    fetchHevyData()
+      .then(h => { if (h && h.workouts) setHevyWorkouts(h.workouts); })
       .catch(() => {});
   }, []);
 
@@ -1309,6 +1366,7 @@ function Home({ navigate }) {
       refresh();
       loadBriefing();
       loadGarmin();
+      loadHevy();
     };
     refreshAll();
 
@@ -1639,6 +1697,16 @@ function Home({ navigate }) {
                 {sleepStr && <span style={{ marginLeft: 8, color: 'var(--text)' }}>（{sleepStr}）</span>}
               </div>
             )}
+            {hevyWorkouts.filter(w => w.date === day.date).map((w, i) => (
+              <div key={i} style={{ fontSize: '0.78rem', color: 'var(--dim)', marginBottom: 8 }}>
+                🏋️ <span style={{ color: 'var(--text)', fontWeight: 600 }}>{w.title || '筋トレ'}</span>
+                {w.minutes != null && <span style={{ marginLeft: 6 }}>{w.minutes}分</span>}
+                {w.exerciseCount != null && w.setCount != null &&
+                  <span style={{ marginLeft: 6 }}>{w.exerciseCount}種目{w.setCount}セット</span>}
+                {w.volumeKg != null && w.volumeKg > 0 &&
+                  <span style={{ marginLeft: 6, color: 'var(--accent)' }}>総挙上 {w.volumeKg.toLocaleString()}kg</span>}
+              </div>
+            ))}
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, rowGap: 12 }}>
               <Stat label="睡眠スコア" value={score} color={scoreColor}/>
               <Stat label="安静時心拍" value={day.restingHr} unit="bpm" color={hrColor}
