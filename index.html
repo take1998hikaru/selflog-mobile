@@ -1703,7 +1703,9 @@ function Home({ navigate }) {
               <div key={i} style={{ fontSize: '0.78rem', color: 'var(--dim)', marginBottom: 8 }}>
                 <div>
                   🏋️ <span style={{ color: 'var(--text)', fontWeight: 600 }}>{w.title || '筋トレ'}</span>
-                  {w.minutes != null && <span style={{ marginLeft: 6 }}>{w.minutes}分</span>}
+                  {(w.startTime || w.endTime) &&
+                    <span style={{ marginLeft: 6 }}>⏰ {w.startTime || '—'}〜{w.endTime || '—'}</span>}
+                  {w.minutes != null && <span style={{ marginLeft: 6 }}>（{w.minutes}分）</span>}
                   {w.exerciseCount != null && w.setCount != null &&
                     <span style={{ marginLeft: 6 }}>{w.exerciseCount}種目{w.setCount}セット</span>}
                   {w.volumeKg != null && w.volumeKg > 0 &&
@@ -3262,7 +3264,8 @@ function SettingsPage() {
 // ═════════════════════════════
 //  Physical（フィジカル推移）
 // ═════════════════════════════
-function TrendChart({ labels, series, height = 110 }) {
+function TrendChart({ labels, series, height = 110, unit, formatVal }) {
+  const [sel, setSel] = useState(null);
   const W = 320, H = height, padL = 4, padR = 30, padT = 10, padB = 16;
   const all = series.flatMap(s => s.data).filter(v => v != null);
   if (!all.length) return <div style={{ color: 'var(--dim)', fontSize: '0.75rem', padding: '12px 0' }}>まだデータがありません</div>;
@@ -3274,40 +3277,84 @@ function TrendChart({ labels, series, height = 110 }) {
   const x = i => padL + (n <= 1 ? (W - padL - padR) / 2 : (W - padL - padR) * i / (n - 1));
   const y = v => padT + (H - padT - padB) * (1 - (v - min) / (max - min));
   const fmt = v => (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString() : Math.round(v * 10) / 10);
+  const fv = formatVal || (v => v == null ? '—' : fmt(v));
+  // 期間切替などでインデックスが範囲外になったら無効化
+  const selIdx = (sel != null && sel < n) ? sel : null;
+  // タップ/クリック位置に最も近い日付を選択（もう一度同じ場所を押すと解除）
+  const pick = e => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const px = (e.clientX - rect.left) / rect.width * W;
+    let best = 0, bd = Infinity;
+    for (let i = 0; i < n; i++) {
+      const d = Math.abs(x(i) - px);
+      if (d < bd) { bd = d; best = i; }
+    }
+    setSel(selIdx === best ? null : best);
+  };
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', display: 'block' }}>
-      {[max - pad, min + pad].map((v, i) => (
-        <g key={i}>
-          <line x1={padL} x2={W - padR} y1={y(v)} y2={y(v)} stroke="var(--border)" strokeWidth="0.5" strokeDasharray="3 3"/>
-          <text x={W - padR + 3} y={y(v) + 3} fontSize="8.5" fill="var(--dim)">{fmt(v)}</text>
-        </g>
-      ))}
-      {series.map((s, si) => {
-        const segs = [];
-        let cur = [];
-        s.data.forEach((v, i) => {
-          if (v == null) { if (cur.length) segs.push(cur); cur = []; }
-          else cur.push([x(i), y(v)]);
-        });
-        if (cur.length) segs.push(cur);
-        const lastSeg = segs[segs.length - 1];
-        const lastPt = lastSeg && lastSeg[lastSeg.length - 1];
-        return (
-          <g key={si}>
-            {segs.map((seg, gi) => seg.length === 1
-              ? <circle key={gi} cx={seg[0][0]} cy={seg[0][1]} r="2.5" fill={s.color}/>
-              : <polyline key={gi} points={seg.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ')}
-                  fill="none" stroke={s.color} strokeWidth={s.thin ? 1 : 2}
-                  strokeDasharray={s.dashed ? '4 3' : undefined}
-                  strokeLinejoin="round" strokeLinecap="round"/>
-            )}
-            {lastPt && !s.thin && <circle cx={lastPt[0]} cy={lastPt[1]} r="3" fill={s.color}/>}
+    <div>
+      <svg viewBox={`0 0 ${W} ${H}`} onClick={pick}
+        style={{ width: '100%', display: 'block', cursor: 'pointer', touchAction: 'manipulation' }}>
+        {[max - pad, min + pad].map((v, i) => (
+          <g key={i}>
+            <line x1={padL} x2={W - padR} y1={y(v)} y2={y(v)} stroke="var(--border)" strokeWidth="0.5" strokeDasharray="3 3"/>
+            <text x={W - padR + 3} y={y(v) + 3} fontSize="8.5" fill="var(--dim)">{fmt(v)}</text>
           </g>
-        );
-      })}
-      <text x={padL} y={H - 4} fontSize="8.5" fill="var(--dim)">{labels[0]}</text>
-      <text x={W - padR} y={H - 4} fontSize="8.5" fill="var(--dim)" textAnchor="end">{labels[n - 1]}</text>
-    </svg>
+        ))}
+        {selIdx != null && (
+          <line x1={x(selIdx)} x2={x(selIdx)} y1={padT} y2={H - padB}
+            stroke="var(--dim)" strokeWidth="0.8" strokeDasharray="2 2"/>
+        )}
+        {series.map((s, si) => {
+          const segs = [];
+          let cur = [];
+          s.data.forEach((v, i) => {
+            if (v == null) { if (cur.length) segs.push(cur); cur = []; }
+            else cur.push([x(i), y(v)]);
+          });
+          if (cur.length) segs.push(cur);
+          const lastSeg = segs[segs.length - 1];
+          const lastPt = lastSeg && lastSeg[lastSeg.length - 1];
+          return (
+            <g key={si}>
+              {segs.map((seg, gi) => seg.length === 1
+                ? <circle key={gi} cx={seg[0][0]} cy={seg[0][1]} r="2.5" fill={s.color}/>
+                : <polyline key={gi} points={seg.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ')}
+                    fill="none" stroke={s.color} strokeWidth={s.thin ? 1 : 2}
+                    strokeDasharray={s.dashed ? '4 3' : undefined}
+                    strokeLinejoin="round" strokeLinecap="round"/>
+              )}
+              {lastPt && !s.thin && <circle cx={lastPt[0]} cy={lastPt[1]} r="3" fill={s.color}/>}
+              {selIdx != null && s.data[selIdx] != null && (
+                <circle cx={x(selIdx)} cy={y(s.data[selIdx])} r="3.5" fill={s.color}
+                  stroke="var(--card2)" strokeWidth="1.2"/>
+              )}
+            </g>
+          );
+        })}
+        <text x={padL} y={H - 4} fontSize="8.5" fill="var(--dim)">{labels[0]}</text>
+        <text x={W - padR} y={H - 4} fontSize="8.5" fill="var(--dim)" textAnchor="end">{labels[n - 1]}</text>
+      </svg>
+      {selIdx != null ? (
+        <div style={{
+          marginTop: 4, padding: '5px 10px', borderRadius: 8,
+          background: 'var(--card2)', border: '1px solid var(--border)',
+          fontSize: '0.72rem', display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'baseline',
+        }}>
+          <span style={{ fontWeight: 700 }}>📍 {(labels[selIdx] || '').replace('-', '/')}</span>
+          {series.map((s, i) => (
+            <span key={i} style={{ color: 'var(--dim)' }}>
+              {series.length > 1 ? `${s.label} ` : ''}
+              <b style={{ color: s.color }}>{fv(s.data[selIdx])}</b>{s.data[selIdx] != null ? (unit || '') : ''}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <div style={{ fontSize: '0.58rem', color: 'var(--dim)', marginTop: 2, textAlign: 'right' }}>
+          グラフをタップすると日付と値が見られます
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -3328,7 +3375,7 @@ function TrendCard({ title, unit, rows, series, formatVal }) {
           <span style={{ margin: '0 4px' }}>／</span>平均 {fv(avg)}{unit}
         </span>
       </div>
-      <TrendChart labels={labels} series={sdata}/>
+      <TrendChart labels={labels} series={sdata} unit={unit} formatVal={fv}/>
       {sdata.length > 1 && (
         <div style={{ display: 'flex', gap: 12, marginTop: 4, fontSize: '0.65rem', color: 'var(--dim)' }}>
           {sdata.map((s, i) => (
@@ -3390,7 +3437,7 @@ function PhysicalPage({ navigate }) {
       />
 
       <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
-        {[[14, '14日'], [30, '30日'], [0, '全期間']].map(([v, label]) => (
+        {[[7, '7日'], [14, '14日'], [30, '30日'], [0, '全期間']].map(([v, label]) => (
           <button key={v} onClick={() => setSpan(v)}
             style={{
               flex: 1, padding: '5px 0', borderRadius: 8, fontFamily: 'inherit', fontSize: '0.75rem', cursor: 'pointer',
@@ -3441,6 +3488,7 @@ function PhysicalPage({ navigate }) {
                 <span style={{ fontSize: '0.68rem', color: 'var(--dim)' }}>{(w.date || '').slice(5).replace('-', '/')}</span>
               </div>
               <div style={{ fontSize: '0.68rem', color: 'var(--dim)', marginTop: 2 }}>
+                {(w.startTime || w.endTime) && `⏰ ${w.startTime || '—'}〜${w.endTime || '—'}・`}
                 {w.minutes != null && `${w.minutes}分`}
                 {w.exerciseCount != null && w.setCount != null && `・${w.exerciseCount}種目${w.setCount}セット`}
                 {w.volumeKg > 0 && <span style={{ color: 'var(--accent)' }}>・総挙上 {w.volumeKg.toLocaleString()}kg</span>}
@@ -3472,12 +3520,14 @@ function PhysicalPage({ navigate }) {
       <TrendCard title="🚶 歩数" unit="歩" rows={shown}
         series={[{ label: '歩数', color: '#9ece6a', get: r => r.steps }]}/>
       {shown.some(r => r.weightKg != null) && (
-        <TrendCard title="⚖️ 体重・筋肉量" unit="kg" rows={shown}
+        <TrendCard title="⚖️ 体重" unit="kg" rows={shown}
           formatVal={v => v == null ? '—' : v.toFixed(1)}
-          series={[
-            { label: '体重', color: '#e0af68', get: r => r.weightKg },
-            { label: '筋肉量', color: '#9ece6a', thin: true, dashed: true, get: r => r.muscleMassKg },
-          ]}/>
+          series={[{ label: '体重', color: '#e0af68', get: r => r.weightKg }]}/>
+      )}
+      {shown.some(r => r.muscleMassKg != null) && (
+        <TrendCard title="💪 筋肉量" unit="kg" rows={shown}
+          formatVal={v => v == null ? '—' : v.toFixed(1)}
+          series={[{ label: '筋肉量', color: '#9ece6a', get: r => r.muscleMassKg }]}/>
       )}
       {shown.some(r => r.bodyFatPct != null) && (
         <TrendCard title="💧 体脂肪率" unit="%" rows={shown}
