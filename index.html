@@ -3458,6 +3458,7 @@ function PhysicalPage({ navigate }) {
   const [updatedAt, setUpdatedAt] = useState(null);
   const [hevy, setHevy] = useState([]);
   const [report, setReport] = useState(null);
+  const [dayIdx, setDayIdx] = useState(0);
 
   useEffect(() => {
     fetchGarminData()
@@ -3479,16 +3480,73 @@ function PhysicalPage({ navigate }) {
   );
 
   const shown = span ? rows.slice(-span) : rows;
-  const avgOf = get => {
-    const vs = shown.map(get).filter(v => v != null);
+  const avgOver = (rs, get) => {
+    const vs = rs.map(get).filter(v => v != null);
     return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null;
   };
+  const avgOf = get => avgOver(shown, get);
+  // 比較のベースライン: 7日/14日→直近30日平均、30日→全期間平均、全期間→比較なし
+  const baseRows = span === 0 ? null : (span === 30 ? rows : rows.slice(-30));
+  const baseLabel = span === 30 ? '全' : '月';
+  const baseOf = get => baseRows ? avgOver(baseRows, get) : null;
   const sleepAvg = avgOf(r => r.sleepMinutes);
   const sleepAvgStr = sleepAvg != null ? `${Math.floor(sleepAvg / 60)}h${String(Math.round(sleepAvg % 60)).padStart(2, '0')}m` : '—';
   const fmtH = v => v == null ? '—' : v.toFixed(1);
   // 表示期間内の筋トレ（Hevy）。shown は日付昇順なので先頭日以降で絞る
   const minDate = shown.length ? shown[0].date : null;
   const hevyShown = hevy.filter(w => w.date && (!minDate || w.date >= minDate));
+  // ベースラインとの差を矢印付きで返す（goodDir: 'up'=増えると良い / 'down'=減ると良い）
+  const cmpOf = (cur, base, mode, goodDir) => {
+    if (cur == null || base == null) return null;
+    const diff = cur - base;
+    let text, isZero;
+    if (mode === 'min') {
+      const d = Math.round(diff);
+      isZero = Math.abs(d) < 3;
+      text = `${d >= 0 ? '+' : '−'}${Math.abs(d)}m`;
+    } else if (mode === 'abs') {
+      const d = Math.round(diff * 10) / 10;
+      isZero = Math.abs(d) < 1;
+      text = `${d >= 0 ? '+' : '−'}${Math.abs(d)}`;
+    } else {
+      const p = base ? Math.round(diff / base * 100) : 0;
+      isZero = Math.abs(p) < 2;
+      text = `${p >= 0 ? '+' : '−'}${Math.abs(p)}%`;
+    }
+    const good = isZero ? null : (goodDir === 'up' ? diff > 0 : diff < 0);
+    return {
+      arrow: isZero ? '→' : diff > 0 ? '↑' : '↓',
+      text: isZero ? `${baseLabel}±0` : `${baseLabel}${text}`,
+      color: isZero ? 'var(--dim)' : good ? 'var(--accent)' : 'var(--orange)',
+    };
+  };
+  // 筋トレは週あたりの回数ペースで比較する
+  const hevyPace = shown.length >= 7 ? hevyShown.length / (shown.length / 7) : null;
+  const baseMinDate = baseRows && baseRows.length ? baseRows[0].date : null;
+  const basePace = baseRows && baseRows.length >= 7
+    ? hevy.filter(w => w.date && w.date >= baseMinDate).length / (baseRows.length / 7) : null;
+  const hevyCmp = (hevyPace != null && basePace != null) ? (() => {
+    const diff = hevyPace - basePace;
+    const isZero = Math.abs(diff) < 0.3;
+    return {
+      arrow: isZero ? '→' : diff > 0 ? '↑' : '↓',
+      text: `${baseLabel}${Math.round(basePace * 10) / 10}回/週`,
+      color: isZero ? 'var(--dim)' : diff > 0 ? 'var(--accent)' : 'var(--orange)',
+    };
+  })() : null;
+  const avgTiles = [
+    { label: '睡眠', val: sleepAvgStr,
+      cmp: cmpOf(sleepAvg, baseOf(r => r.sleepMinutes), 'min', 'up') },
+    { label: '睡眠スコア', val: avgOf(r => r.sleepScore) != null ? Math.round(avgOf(r => r.sleepScore)) : '—',
+      cmp: cmpOf(avgOf(r => r.sleepScore), baseOf(r => r.sleepScore), 'abs', 'up') },
+    { label: '歩数', val: avgOf(r => r.steps) != null ? Math.round(avgOf(r => r.steps)).toLocaleString() : '—',
+      cmp: cmpOf(avgOf(r => r.steps), baseOf(r => r.steps), 'pct', 'up') },
+    { label: '消費kcal', val: avgOf(r => r.calories) != null ? Math.round(avgOf(r => r.calories)).toLocaleString() : '—',
+      cmp: cmpOf(avgOf(r => r.calories), baseOf(r => r.calories), 'pct', 'up') },
+    { label: '安静時心拍', val: avgOf(r => r.restingHr) != null ? Math.round(avgOf(r => r.restingHr)) : '—',
+      cmp: cmpOf(avgOf(r => r.restingHr), baseOf(r => r.restingHr), 'abs', 'down') },
+    { label: '筋トレ', val: hevyShown.length ? `${hevyShown.length}回` : '—', cmp: hevyCmp },
+  ];
 
   return (
     <div className="page">
@@ -3502,6 +3560,68 @@ function PhysicalPage({ navigate }) {
           </button>
         }
       />
+
+      {/* ⌚ 今日のフィジカル（ホームと同じ内容、◀▶で過去の日へ） */}
+      {rows.length > 0 && (() => {
+        const idx = Math.min(dayIdx, rows.length - 1);
+        const day = rows[rows.length - 1 - idx];
+        const relLabel = idx === 0 ? '今日' : idx === 1 ? '昨日' : idx === 2 ? '一昨日' : `${idx}日前`;
+        const dayWorkouts = hevy.filter(w => w.date === day.date);
+        const daySets = dayWorkouts.reduce((a, w) => a + (w.setCount || 0), 0);
+        const sm = day.sleepMinutes;
+        const sleepStr = (sm != null) ? `${Math.floor(sm / 60)}h ${sm % 60}m` : null;
+        const score = day.sleepScore;
+        const scoreColor = score == null ? 'var(--dim)'
+          : score >= 80 ? 'var(--accent)'
+          : score >= 60 ? 'var(--orange)'
+          : 'var(--red, #e06)';
+        const navBtn = disabled => ({
+          border: '1px solid var(--border)', background: 'var(--card2)',
+          color: disabled ? 'var(--border)' : 'var(--text)',
+          borderRadius: 6, padding: '1px 8px', fontSize: '0.7rem',
+          cursor: disabled ? 'default' : 'pointer', fontFamily: 'inherit',
+        });
+        const stats = [
+          ['睡眠スコア', score, '', scoreColor],
+          ['安静時心拍', day.restingHr, 'bpm', null],
+          ['歩数', day.steps != null ? day.steps.toLocaleString() : null, '', null],
+          ['ストレス', day.stress, '', null],
+          ['消費kcal', day.calories != null ? day.calories.toLocaleString() : null, '', null],
+          ['筋トレ', dayWorkouts.length ? `あり` : 'なし',
+           dayWorkouts.length ? `（${daySets}セット）` : '',
+           dayWorkouts.length ? 'var(--accent)' : 'var(--dim)'],
+        ];
+        return (
+          <div className="card">
+            <div className="card-title" style={{ marginBottom: 6 }}>
+              <span>⌚ {relLabel}のフィジカル</span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <button onClick={() => setDayIdx(Math.min(idx + 1, rows.length - 1))}
+                  disabled={idx >= rows.length - 1} style={navBtn(idx >= rows.length - 1)}>◀</button>
+                <span style={{ fontSize: '0.7rem', color: 'var(--dim)', fontWeight: 500 }}>{day.date}</span>
+                <button onClick={() => setDayIdx(Math.max(idx - 1, 0))}
+                  disabled={idx === 0} style={navBtn(idx === 0)}>▶</button>
+              </span>
+            </div>
+            {(day.bedTime || day.wakeTime) && (
+              <div style={{ fontSize: '0.72rem', color: 'var(--dim)', marginBottom: 6 }}>
+                🛏 {day.bedTime || '—'} 〜 {day.wakeTime || '—'}{sleepStr ? `（${sleepStr}）` : ''}
+              </div>
+            )}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, rowGap: 12 }}>
+              {stats.map(([label, v, unit, color]) => (
+                <div key={label} style={{ flex: '1 1 70px', minWidth: 64 }}>
+                  <div style={{ fontSize: '0.62rem', color: 'var(--dim)', marginBottom: 1 }}>{label}</div>
+                  <div style={{ fontSize: '1.05rem', fontWeight: 700, color: color || 'var(--text)', lineHeight: 1.2 }}>
+                    {v != null ? v : '—'}
+                    {v != null && unit ? <span style={{ fontSize: '0.6rem', fontWeight: 500, color: 'var(--dim)', marginLeft: 1 }}>{unit}</span> : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
 
       <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
         {[[7, '7日'], [14, '14日'], [30, '30日'], [0, '全期間']].map(([v, label]) => (
@@ -3520,21 +3640,22 @@ function PhysicalPage({ navigate }) {
       <div className="card">
         <div className="card-title" style={{ marginBottom: 8 }}>
           <span>この期間の平均（{shown.length}日分）</span>
+          {baseRows && (
+            <span style={{ fontSize: '0.65rem', color: 'var(--dim)', fontWeight: 500 }}>
+              矢印は{span === 30 ? '全期間' : '30日'}平均との比較
+            </span>
+          )}
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, rowGap: 12 }}>
-          {[
-            ['睡眠', sleepAvgStr],
-            ['睡眠スコア', avgOf(r => r.sleepScore), v => Math.round(v)],
-            ['歩数', avgOf(r => r.steps), v => Math.round(v).toLocaleString()],
-            ['消費kcal', avgOf(r => r.calories), v => Math.round(v).toLocaleString()],
-            ['安静時心拍', avgOf(r => r.restingHr), v => Math.round(v)],
-            ['筋トレ', hevyShown.length || null, v => `${v}回`],
-          ].map(([label, v, f]) => (
-            <div key={label} style={{ flex: '1 1 70px', minWidth: 64 }}>
-              <div style={{ fontSize: '0.62rem', color: 'var(--dim)', marginBottom: 1 }}>{label}</div>
-              <div style={{ fontSize: '1.05rem', fontWeight: 700, lineHeight: 1.2 }}>
-                {v == null ? '—' : (f ? f(v) : v)}
-              </div>
+          {avgTiles.map(t => (
+            <div key={t.label} style={{ flex: '1 1 80px', minWidth: 72 }}>
+              <div style={{ fontSize: '0.62rem', color: 'var(--dim)', marginBottom: 1 }}>{t.label}</div>
+              <div style={{ fontSize: '1.05rem', fontWeight: 700, lineHeight: 1.2 }}>{t.val}</div>
+              {t.cmp && (
+                <div style={{ fontSize: '0.6rem', color: t.cmp.color, marginTop: 1, fontWeight: 600 }}>
+                  {t.cmp.arrow} {t.cmp.text}
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -3550,6 +3671,36 @@ function PhysicalPage({ navigate }) {
           background: tag === 'ずれ' ? 'rgba(255,170,60,0.15)' : tag === '発見' ? 'rgba(0,200,150,0.12)' : 'rgba(120,140,160,0.18)',
           color: tag === 'ずれ' ? 'var(--orange)' : tag === '発見' ? 'var(--accent)' : 'var(--dim)',
         });
+        // 月平均との差（スコア=大きいほど良い、時間=長いほど良い、就寝=遅いほど悪い）
+        const mCmp = (cur, base, mode, goodDir) => {
+          if (cur == null || base == null) return null;
+          const diff = cur - base;
+          if (mode === 'min') {
+            const d = Math.round(diff);
+            if (Math.abs(d) < 3) return { text: '→ 月±0', color: 'var(--dim)' };
+            const good = goodDir === 'up' ? d > 0 : d < 0;
+            return { text: `${d > 0 ? '↑' : '↓'} 月${d > 0 ? '+' : '−'}${Math.abs(d)}m`,
+                     color: good ? 'var(--accent)' : 'var(--orange)' };
+          }
+          if (mode === 'bed') {
+            const d = Math.round(diff);
+            if (Math.abs(d) < 5) return { text: '→ 月±0', color: 'var(--dim)' };
+            return d > 0
+              ? { text: `⚠ 月+${d}分遅い`, color: 'var(--orange)' }
+              : { text: `月−${Math.abs(d)}分早い`, color: 'var(--accent)' };
+          }
+          const d = Math.round(diff * 10) / 10;
+          if (Math.abs(d) < 1) return { text: '→ 月±0', color: 'var(--dim)' };
+          const good = goodDir === 'up' ? d > 0 : d < 0;
+          return { text: `${d > 0 ? '↑' : '↓'} 月${d > 0 ? '+' : '−'}${Math.abs(d)}`,
+                   color: good ? 'var(--accent)' : 'var(--orange)' };
+        };
+        const scoreCmp = mCmp(s.week.score, s.month?.score, 'abs', 'up');
+        const minCmp = mCmp(s.week.minutes, s.month?.minutes, 'min', 'up');
+        const bedCmp = mCmp(s.week.bedMinutes, s.month?.bedMinutes, 'bed');
+        const cmpSpan = c => c ? (
+          <span style={{ fontSize: '0.62rem', fontWeight: 600, color: c.color, marginLeft: 4 }}>{c.text}</span>
+        ) : null;
         return (
           <div className="card">
             <div className="card-title" style={{ marginBottom: 8 }}>
@@ -3557,23 +3708,29 @@ function PhysicalPage({ navigate }) {
               <span style={{ fontSize: '0.65rem', color: 'var(--dim)', fontWeight: 500 }}>週平均 vs 月平均</span>
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, rowGap: 12, marginBottom: 10 }}>
-              <div style={{ flex: '1 1 90px', minWidth: 84 }}>
+              <div style={{ flex: '1 1 100px', minWidth: 94 }}>
                 <div style={{ fontSize: '0.62rem', color: 'var(--dim)', marginBottom: 1 }}>週平均スコア</div>
-                <div style={{ fontSize: '1.05rem', fontWeight: 700, lineHeight: 1.2 }}>{s.week.score ?? '—'}</div>
+                <div style={{ fontSize: '1.05rem', fontWeight: 700, lineHeight: 1.2 }}>
+                  {s.week.score ?? '—'}{cmpSpan(scoreCmp)}
+                </div>
                 <div style={{ fontSize: '0.58rem', color: 'var(--dim)', marginTop: 1 }}>
                   先週 {s.prevWeek?.score ?? '—'} ・ 月 {s.month?.score ?? '—'}
                 </div>
               </div>
-              <div style={{ flex: '1 1 90px', minWidth: 84 }}>
+              <div style={{ flex: '1 1 100px', minWidth: 94 }}>
                 <div style={{ fontSize: '0.62rem', color: 'var(--dim)', marginBottom: 1 }}>週平均睡眠時間</div>
-                <div style={{ fontSize: '1.05rem', fontWeight: 700, lineHeight: 1.2 }}>{hm(s.week.minutes)}</div>
+                <div style={{ fontSize: '1.05rem', fontWeight: 700, lineHeight: 1.2 }}>
+                  {hm(s.week.minutes)}{cmpSpan(minCmp)}
+                </div>
                 <div style={{ fontSize: '0.58rem', color: 'var(--dim)', marginTop: 1 }}>
                   先週 {hm(s.prevWeek?.minutes)} ・ 月 {hm(s.month?.minutes)}
                 </div>
               </div>
-              <div style={{ flex: '1 1 90px', minWidth: 84 }}>
+              <div style={{ flex: '1 1 100px', minWidth: 94 }}>
                 <div style={{ fontSize: '0.62rem', color: 'var(--dim)', marginBottom: 1 }}>週平均の就寝</div>
-                <div style={{ fontSize: '1.05rem', fontWeight: 700, lineHeight: 1.2 }}>{bed(s.week.bedMinutes)}</div>
+                <div style={{ fontSize: '1.05rem', fontWeight: 700, lineHeight: 1.2 }}>
+                  {bed(s.week.bedMinutes)}{cmpSpan(bedCmp)}
+                </div>
                 <div style={{ fontSize: '0.58rem', color: 'var(--dim)', marginTop: 1 }}>
                   月平均 {bed(s.month?.bedMinutes)}
                 </div>
