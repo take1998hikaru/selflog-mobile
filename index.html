@@ -76,6 +76,34 @@ function loadBriefingFromGist() {
     .catch(() => null);
 }
 
+// ── 気づきレポート（クラウドが3時間ごとに生成する selfcare_report.json）を読む ──
+const REPORT_GIST_FILENAME = 'selfcare_report.json';
+
+function loadReportFromGist() {
+  const token = getSyncToken();
+  const gistId = getSyncGistId();
+  if (!token || !gistId) return Promise.resolve(null);
+  return fetch('https://api.github.com/gists/' + gistId, {
+    headers: { 'Authorization': 'token ' + token }
+  })
+    .then(res => res.ok ? res.json() : null)
+    .then(data => {
+      if (!data) return null;
+      const file = data.files && data.files[REPORT_GIST_FILENAME];
+      if (!file || !file.content) return null;
+      try { return JSON.parse(file.content); } catch { return null; }
+    })
+    .catch(() => null);
+}
+
+// レポート取得の共通入口: PCは /api/report（サーバがGistを中継）、スマホはGistから直接読む
+function fetchReport() {
+  return fetch('/api/report')
+    .then(res => { if (!res.ok) throw new Error('api unavailable'); return res.json(); })
+    .then(r => (r && !r.error && (r.changes || r.sleep || r.exercise)) ? r : Promise.reject(new Error('empty')))
+    .catch(() => loadReportFromGist());
+}
+
 // ── Garmin 日次データを既存Gistにリレー（スマホ閲覧用、ブリーフィングと同方式） ──
 const GARMIN_GIST_FILENAME = 'selfcare_garmin.json';
 
@@ -1246,6 +1274,7 @@ function Home({ navigate }) {
   const [status, setStatus] = useState({});
   const [priorityItems, setPriorityItems] = useState([]);
   const [briefing, setBriefing] = useState(null);
+  const [report, setReport] = useState(null);
   const [briefingLoading, setBriefingLoading] = useState(false);
   const [briefingDate, setBriefingDate] = useState(DB.today());
   const [briefingSource, setBriefingSource] = useState(null); // 'api'(PC) | 'gist'(スマホ)
@@ -1367,6 +1396,7 @@ function Home({ navigate }) {
       loadBriefing();
       loadGarmin();
       loadHevy();
+      fetchReport().then(r => { if (r) setReport(r); });
     };
     refreshAll();
 
@@ -1467,6 +1497,41 @@ function Home({ navigate }) {
       }}>
         {motivMsg.text}
       </div>
+
+      {/* ✨ 今日の気づき（クラウドが3時間ごとに生成、PCオフでも更新） */}
+      {report && (
+        <div className="card">
+          <div className="card-title" style={{ marginBottom: 8 }}>
+            <span>✨ 今日の気づき</span>
+            {report.generatedAt && (
+              <span style={{ fontSize: '0.65rem', color: 'var(--dim)', fontWeight: 500 }}>
+                {fmtUpdated(report.generatedAt)} 更新
+              </span>
+            )}
+          </div>
+          {(report.changes || []).length === 0 ? (
+            <div style={{ fontSize: '0.78rem', color: 'var(--dim)' }}>
+              大きな変化なし。いつも通りのペースです
+            </div>
+          ) : (
+            (report.changes || []).map((ev, i) => (
+              <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: i ? 7 : 0 }}>
+                <span style={{
+                  fontSize: '0.6rem', padding: '1px 7px', borderRadius: 6, whiteSpace: 'nowrap',
+                  marginTop: 2, fontWeight: 700,
+                  background: ev.severity === 'high' ? 'rgba(255,80,80,0.15)'
+                    : ev.severity === 'medium' ? 'rgba(255,170,60,0.15)' : 'rgba(120,140,160,0.18)',
+                  color: ev.severity === 'high' ? '#ff7070'
+                    : ev.severity === 'medium' ? 'var(--orange)' : 'var(--dim)',
+                }}>
+                  {ev.severity === 'high' ? '重要' : ev.severity === 'medium' ? '注目' : 'メモ'}
+                </span>
+                <span style={{ fontSize: '0.78rem', lineHeight: 1.45 }}>{ev.label}</span>
+              </div>
+            ))
+          )}
+        </div>
+      )}
 
       {/* 朝のブリーフィング（SwitchBot）カードは 2026-07-13 に学長の依頼で非表示化（データ取得・Gist中継は継続） */}
       {false && briefing && (briefingSource === 'api' || briefing.devices?.寝室 || briefing.devices?.外 || Object.keys(briefing.latest || {}).length > 0) && (
@@ -3392,6 +3457,7 @@ function PhysicalPage({ navigate }) {
   const [span, setSpan] = useState(14);
   const [updatedAt, setUpdatedAt] = useState(null);
   const [hevy, setHevy] = useState([]);
+  const [report, setReport] = useState(null);
 
   useEffect(() => {
     fetchGarminData()
@@ -3403,6 +3469,7 @@ function PhysicalPage({ navigate }) {
     fetchHevyData()
       .then(h => { if (h && h.workouts) setHevy(h.workouts); })
       .catch(() => {});
+    fetchReport().then(r => { if (r) setReport(r); });
   }, []);
 
   if (rows === null) return (
@@ -3472,6 +3539,107 @@ function PhysicalPage({ navigate }) {
           ))}
         </div>
       </div>
+
+      {/* 😴 睡眠レポート（クラウドが3時間ごとに生成） */}
+      {report && report.sleep && report.sleep.week && (() => {
+        const s = report.sleep;
+        const hm = v => v == null ? '—' : `${Math.floor(v / 60)}h${String(Math.round(v % 60)).padStart(2, '0')}m`;
+        const bed = v => v == null ? '—' : `${Math.floor(v / 60) % 24}:${String(Math.round(v % 60)).padStart(2, '0')}`;
+        const tagStyle = tag => ({
+          fontSize: '0.6rem', padding: '1px 7px', borderRadius: 6, whiteSpace: 'nowrap', marginTop: 2, fontWeight: 700,
+          background: tag === 'ずれ' ? 'rgba(255,170,60,0.15)' : tag === '発見' ? 'rgba(0,200,150,0.12)' : 'rgba(120,140,160,0.18)',
+          color: tag === 'ずれ' ? 'var(--orange)' : tag === '発見' ? 'var(--accent)' : 'var(--dim)',
+        });
+        return (
+          <div className="card">
+            <div className="card-title" style={{ marginBottom: 8 }}>
+              <span>😴 睡眠レポート</span>
+              <span style={{ fontSize: '0.65rem', color: 'var(--dim)', fontWeight: 500 }}>週平均 vs 月平均</span>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, rowGap: 12, marginBottom: 10 }}>
+              <div style={{ flex: '1 1 90px', minWidth: 84 }}>
+                <div style={{ fontSize: '0.62rem', color: 'var(--dim)', marginBottom: 1 }}>週平均スコア</div>
+                <div style={{ fontSize: '1.05rem', fontWeight: 700, lineHeight: 1.2 }}>{s.week.score ?? '—'}</div>
+                <div style={{ fontSize: '0.58rem', color: 'var(--dim)', marginTop: 1 }}>
+                  先週 {s.prevWeek?.score ?? '—'} ・ 月 {s.month?.score ?? '—'}
+                </div>
+              </div>
+              <div style={{ flex: '1 1 90px', minWidth: 84 }}>
+                <div style={{ fontSize: '0.62rem', color: 'var(--dim)', marginBottom: 1 }}>週平均睡眠時間</div>
+                <div style={{ fontSize: '1.05rem', fontWeight: 700, lineHeight: 1.2 }}>{hm(s.week.minutes)}</div>
+                <div style={{ fontSize: '0.58rem', color: 'var(--dim)', marginTop: 1 }}>
+                  先週 {hm(s.prevWeek?.minutes)} ・ 月 {hm(s.month?.minutes)}
+                </div>
+              </div>
+              <div style={{ flex: '1 1 90px', minWidth: 84 }}>
+                <div style={{ fontSize: '0.62rem', color: 'var(--dim)', marginBottom: 1 }}>週平均の就寝</div>
+                <div style={{ fontSize: '1.05rem', fontWeight: 700, lineHeight: 1.2 }}>{bed(s.week.bedMinutes)}</div>
+                <div style={{ fontSize: '0.58rem', color: 'var(--dim)', marginTop: 1 }}>
+                  月平均 {bed(s.month?.bedMinutes)}
+                </div>
+              </div>
+            </div>
+            {(s.insights || []).map((ins, i) => (
+              <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start',
+                                    marginTop: 7, paddingTop: i === 0 ? 8 : 0,
+                                    borderTop: i === 0 ? '1px solid var(--border)' : 'none' }}>
+                <span style={tagStyle(ins.tag)}>{ins.tag}</span>
+                <span style={{ fontSize: '0.75rem', lineHeight: 1.45 }}>{ins.text}</span>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+
+      {/* 🏋️ 運動量レポート（今週vs先週・去年同月比） */}
+      {report && report.exercise && report.exercise.week && (() => {
+        const ex = report.exercise;
+        const maxVol = Math.max(...ex.months.map(m => m.volumeKg || 0), 1);
+        return (
+          <div className="card">
+            <div className="card-title" style={{ marginBottom: 8 }}>
+              <span>🏋️ 運動量レポート</span>
+              <span style={{ fontSize: '0.65rem', color: 'var(--dim)', fontWeight: 500 }}>今週 vs 先週</span>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, rowGap: 12, marginBottom: 12 }}>
+              {[
+                ['筋トレ回数', `${ex.week.workouts}回`, `先週 ${ex.prevWeek.workouts}回`],
+                ['セット数', ex.week.sets, `先週 ${ex.prevWeek.sets}`],
+                ['総挙上量', `${(ex.week.volumeKg || 0).toLocaleString()}kg`, `先週 ${(ex.prevWeek.volumeKg || 0).toLocaleString()}kg`],
+                ['歩数/日', ex.week.stepsAvg != null ? ex.week.stepsAvg.toLocaleString() : '—',
+                 `先週 ${ex.prevWeek.stepsAvg != null ? ex.prevWeek.stepsAvg.toLocaleString() : '—'}`],
+              ].map(([label, v, sub]) => (
+                <div key={label} style={{ flex: '1 1 80px', minWidth: 74 }}>
+                  <div style={{ fontSize: '0.62rem', color: 'var(--dim)', marginBottom: 1 }}>{label}</div>
+                  <div style={{ fontSize: '1.05rem', fontWeight: 700, lineHeight: 1.2 }}>{v}</div>
+                  <div style={{ fontSize: '0.58rem', color: 'var(--dim)', marginTop: 1 }}>{sub}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ fontSize: '0.62rem', color: 'var(--dim)', marginBottom: 6 }}>月間の総挙上量 ・ 去年同月と比較</div>
+            {ex.months.map((m, i) => (
+              <div key={i} style={{ marginBottom: 7 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', marginBottom: 2 }}>
+                  <span>{m.label}</span>
+                  <span style={{ color: 'var(--dim)' }}>{(m.volumeKg || 0).toLocaleString()}kg ・ {m.workouts}回</span>
+                </div>
+                <div style={{ background: 'var(--card2)', borderRadius: 4, height: 8 }}>
+                  <div style={{ background: i === ex.months.length - 1 ? 'var(--accent)' : 'var(--dim)',
+                                width: `${Math.round((m.volumeKg || 0) / maxVol * 100)}%`,
+                                height: 8, borderRadius: 4, opacity: i === ex.months.length - 1 ? 1 : 0.55 }}/>
+                </div>
+              </div>
+            ))}
+            {ex.paceNote && (
+              <div style={{ fontSize: '0.72rem', color: 'var(--accent)', marginTop: 6 }}>{ex.paceNote}</div>
+            )}
+            {ex.stepsNote && (
+              <div style={{ fontSize: '0.62rem', color: 'var(--dim)', marginTop: 6,
+                            borderTop: '1px solid var(--border)', paddingTop: 6 }}>{ex.stepsNote}</div>
+            )}
+          </div>
+        );
+      })()}
 
       {hevyShown.length > 0 && (
         <div className="card">
