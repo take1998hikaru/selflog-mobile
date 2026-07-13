@@ -3752,6 +3752,28 @@ function PhysicalPage({ navigate }) {
       {report && report.exercise && report.exercise.week && (() => {
         const ex = report.exercise;
         const maxVol = Math.max(...ex.months.map(m => m.volumeKg || 0), 1);
+        // 同時期の筋トレ履歴: 先月・去年の同日（無い日付は月末に丸め）から1週間以内の最初の記録
+        const sortedHevy = [...hevy].filter(w => w.date).sort((a, b) => (a.date < b.date ? -1 : 1));
+        const fmtD = dt => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+        const clampDate = (y, m, d) => new Date(y, m, Math.min(d, new Date(y, m + 1, 0).getDate()));
+        const now = new Date();
+        const buildRef = (label, baseDt) => {
+          const base = fmtD(baseDt);
+          const lim = new Date(baseDt);
+          lim.setDate(lim.getDate() + 7);
+          const limit = fmtD(lim);
+          const first = sortedHevy.find(w => w.date >= base && w.date <= limit);
+          return {
+            label,
+            baseLabel: `${baseDt.getFullYear()}/${baseDt.getMonth() + 1}/${baseDt.getDate()}`,
+            dateLabel: first ? first.date.replace(/-/g, '/') : null,
+            workouts: first ? sortedHevy.filter(w => w.date === first.date) : [],
+          };
+        };
+        const sameTime = [
+          buildRef('先月', clampDate(now.getFullYear(), now.getMonth() - 1, now.getDate())),
+          buildRef('去年', clampDate(now.getFullYear() - 1, now.getMonth(), now.getDate())),
+        ];
         return (
           <div className="card">
             <div className="card-title" style={{ marginBottom: 8 }}>
@@ -3794,37 +3816,39 @@ function PhysicalPage({ navigate }) {
               <div style={{ fontSize: '0.62rem', color: 'var(--dim)', marginTop: 6,
                             borderTop: '1px solid var(--border)', paddingTop: 6 }}>{ex.stepsNote}</div>
             )}
+            <div style={{ marginTop: 10, borderTop: '1px solid var(--border)', paddingTop: 8 }}>
+              <div style={{ fontSize: '0.62rem', color: 'var(--dim)', marginBottom: 2 }}>
+                📅 同時期の筋トレ履歴（基準日から1週間以内の最初の記録）
+              </div>
+              {sameTime.map(ref => (
+                <div key={ref.label} style={{ marginTop: 6 }}>
+                  <div style={{ fontSize: '0.75rem', fontWeight: 600 }}>
+                    {ref.label}
+                    <span style={{ color: 'var(--dim)', fontWeight: 500 }}>（基準 {ref.baseLabel}）</span>
+                    {ref.dateLabel
+                      ? <span style={{ color: 'var(--accent)', marginLeft: 4 }}>→ {ref.dateLabel}</span>
+                      : <span style={{ color: 'var(--dim)', marginLeft: 4 }}>この時期の記録なし</span>}
+                  </div>
+                  {ref.workouts.map((w, i) => (
+                    <div key={w.id || i} style={{ padding: '4px 0 0 8px' }}>
+                      <span style={{ fontSize: '0.75rem', fontWeight: 600 }}>{w.title || '筋トレ'}</span>
+                      <div style={{ fontSize: '0.66rem', color: 'var(--dim)', marginTop: 1 }}>
+                        {(w.startTime || w.endTime) && `⏰ ${w.startTime || '—'}〜${w.endTime || '—'}・`}
+                        {w.minutes != null && `${w.minutes}分`}
+                        {w.exerciseCount != null && w.setCount != null && `・${w.exerciseCount}種目${w.setCount}セット`}
+                        {w.volumeKg > 0 && <span style={{ color: 'var(--accent)' }}>・総挙上 {w.volumeKg.toLocaleString()}kg</span>}
+                      </div>
+                      {(w.summary || '').split('／').filter(Boolean).map((s, j) => (
+                        <div key={j} style={{ fontSize: '0.7rem', marginTop: 1 }}>・{s}</div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
           </div>
         );
       })()}
-
-      {hevyShown.length > 0 && (
-        <div className="card">
-          <div className="card-title" style={{ marginBottom: 4 }}>
-            <span>🏋️ 筋トレ記録（Hevy）</span>
-            <span style={{ fontSize: '0.7rem', color: 'var(--dim)', fontWeight: 500 }}>
-              この期間 <b style={{ color: 'var(--accent)', fontSize: '0.85rem' }}>{hevyShown.length}</b>回
-            </span>
-          </div>
-          {[...hevyShown].reverse().map((w, i) => (
-            <div key={w.id || i} style={{ padding: '8px 0', borderTop: i ? '1px solid var(--border)' : 'none' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                <span style={{ fontSize: '0.82rem', fontWeight: 600 }}>{w.title || '筋トレ'}</span>
-                <span style={{ fontSize: '0.68rem', color: 'var(--dim)' }}>{(w.date || '').slice(5).replace('-', '/')}</span>
-              </div>
-              <div style={{ fontSize: '0.68rem', color: 'var(--dim)', marginTop: 2 }}>
-                {(w.startTime || w.endTime) && `⏰ ${w.startTime || '—'}〜${w.endTime || '—'}・`}
-                {w.minutes != null && `${w.minutes}分`}
-                {w.exerciseCount != null && w.setCount != null && `・${w.exerciseCount}種目${w.setCount}セット`}
-                {w.volumeKg > 0 && <span style={{ color: 'var(--accent)' }}>・総挙上 {w.volumeKg.toLocaleString()}kg</span>}
-              </div>
-              {(w.summary || '').split('／').filter(Boolean).map((s, j) => (
-                <div key={j} style={{ fontSize: '0.72rem', marginTop: 2 }}>・{s}</div>
-              ))}
-            </div>
-          ))}
-        </div>
-      )}
 
       <TrendCard title="😴 睡眠スコア" rows={shown}
         series={[{ label: 'スコア', color: 'var(--accent)', get: r => r.sleepScore }]}/>
@@ -3858,6 +3882,34 @@ function PhysicalPage({ navigate }) {
         <TrendCard title="💧 体脂肪率" unit="%" rows={shown}
           formatVal={v => v == null ? '—' : v.toFixed(1)}
           series={[{ label: '体脂肪率', color: '#f7768e', get: r => r.bodyFatPct }]}/>
+      )}
+
+      {hevyShown.length > 0 && (
+        <div className="card">
+          <div className="card-title" style={{ marginBottom: 4 }}>
+            <span>🏋️ 筋トレ記録（Hevy）</span>
+            <span style={{ fontSize: '0.7rem', color: 'var(--dim)', fontWeight: 500 }}>
+              この期間 <b style={{ color: 'var(--accent)', fontSize: '0.85rem' }}>{hevyShown.length}</b>回
+            </span>
+          </div>
+          {[...hevyShown].reverse().map((w, i) => (
+            <div key={w.id || i} style={{ padding: '8px 0', borderTop: i ? '1px solid var(--border)' : 'none' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                <span style={{ fontSize: '0.82rem', fontWeight: 600 }}>{w.title || '筋トレ'}</span>
+                <span style={{ fontSize: '0.68rem', color: 'var(--dim)' }}>{(w.date || '').slice(5).replace('-', '/')}</span>
+              </div>
+              <div style={{ fontSize: '0.68rem', color: 'var(--dim)', marginTop: 2 }}>
+                {(w.startTime || w.endTime) && `⏰ ${w.startTime || '—'}〜${w.endTime || '—'}・`}
+                {w.minutes != null && `${w.minutes}分`}
+                {w.exerciseCount != null && w.setCount != null && `・${w.exerciseCount}種目${w.setCount}セット`}
+                {w.volumeKg > 0 && <span style={{ color: 'var(--accent)' }}>・総挙上 {w.volumeKg.toLocaleString()}kg</span>}
+              </div>
+              {(w.summary || '').split('／').filter(Boolean).map((s, j) => (
+                <div key={j} style={{ fontSize: '0.72rem', marginTop: 2 }}>・{s}</div>
+              ))}
+            </div>
+          ))}
+        </div>
       )}
 
       <div style={{ fontSize: '0.68rem', color: 'var(--dim)', textAlign: 'center', margin: '4px 0 12px' }}>
